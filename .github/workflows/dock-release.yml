@@ -1,0 +1,130 @@
+name: Dock build (upstream release + dock refresh)
+
+# Every day: if upstream CrossPoint has a new stable release that this fork has
+# not rebuilt yet, check out that upstream tag, apply dock/apply.py, build and
+# publish a release with the SAME tag here. The device's OTA (pointed at this
+# repo by apply.py) then offers it like an official update.
+#
+# Fork setup: keep this file and dock/ on this repo's default branch.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (empty = latest stable)"
+        required: false
+      force:
+        description: "Rebuild even if the release already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: crosspoint-reader/crosspoint-reader
+  # "<pio env>:<asset device suffix>" pairs, space separated. Keep only yours:
+  #   gh_release:x3-x4   x4pro-gh_release:x4pro   x4c-gh_release:x4c
+  DOCK_TARGETS: "gh_release:x3-x4"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${FORCE:-false}" != "true" ] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already built"; echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building $tag"; echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dock tooling (this repo)
+        uses: actions/checkout@v6
+        with:
+          path: fork
+
+      - name: Checkout upstream tag
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.check.outputs.tag }}
+          submodules: recursive
+          path: src
+
+      - name: Apply dock refresh
+        run: |
+          python3 fork/dock/apply.py src "$GITHUB_REPOSITORY"
+          # Mark the build on the device: "2.1.0-dock". OTA compares only the
+          # numeric x.y.z, so the next upstream version still counts as newer.
+          sed -i 's/-DCROSSPOINT_VERSION=\\"${crosspoint.version}\\"/-DCROSSPOINT_VERSION=\\"${crosspoint.version}-dock\\"/' src/platformio.ini
+          grep -n 'crosspoint.version}-dock' src/platformio.ini
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - name: Install PlatformIO Core
+        run: |
+          # Same pins as upstream .github/workflows/release.yml
+          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
+            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
+            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
+            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+
+      - name: Build
+        working-directory: src
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          for target in $DOCK_TARGETS; do
+            env="${target%%:*}"; device="${target##*:}"
+            pio pkg install -e "$env"
+            uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19" || true
+            pio run -e "$env" -j1
+            cp ".pio/build/$env/firmware.bin" "../dist/crosspoint-${TAG#v}-${device}.bin"
+          done
+          ls -l ../dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="Upstream CrossPoint $TAG + dock refresh (timer wake on USB power).
+          Enable: put the interval in minutes (e.g. 120) into /.crosspoint/dock-refresh.txt on the SD card."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.bin --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/*.bin --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG-dock" --notes "$notes" --latest
+          fi
