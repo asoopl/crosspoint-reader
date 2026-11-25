@@ -27,7 +27,7 @@ env:
   UPSTREAM: crosspoint-reader/crosspoint-reader
   # "<pio env>:<asset device suffix>" pairs, space separated. Keep only yours:
   #   gh_release:x3-x4   x4pro-gh_release:x4pro   x4c-gh_release:x4c
-  DOCK_TARGETS: "gh_release:x3-x4"
+  DOCK_TARGETS: "gh_release:x4pro"
 
 jobs:
   check:
