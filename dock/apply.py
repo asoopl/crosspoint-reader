@@ -59,6 +59,8 @@ def main() -> None:
     s = sub_once(
         s,
         r'^([ \t]*)(APP_STATE\.lastSleepFromReader = activityManager\.isReaderActivity\(\);)',
+        r"\1// Re-read the config at every sleep: it may have been edited since boot.\n"
+        r"\1dockrefresh::load();\n"
         r"\1// A dock-refresh pass never opened an activity; keep the real last-sleep context.\n"
         r"\1if (!dockRefreshPass) \2",
         "lastSleepFromReader assignment")
@@ -66,14 +68,14 @@ def main() -> None:
     s = sub_once(
         s,
         r'^([ \t]*)(powerManager\.startDeepSleep\(gpio, wakeOnHeldButton\);)',
-        r"\1dockrefresh::armIfDocked(gpio.isUsbConnected());\n\1\2",
+        r"\1dockrefresh::arm(gpio.isUsbConnected(), powerManager.getBatteryPercentage());\n\1\2",
         "final startDeepSleep call")
 
     s = sub_once(
         s,
         r'^([ \t]*)(APP_STATE\.loadFromFile\(\);\n)(\s*const bool isSleepWake =)',
         r"\1\2\1dockrefresh::load();\n"
-        r"\1dockRefreshPass = dockrefresh::isTimerWake() && dockrefresh::intervalMinutes() > 0;\n\3",
+        r"\1dockRefreshPass = dockrefresh::isTimerWake() && dockrefresh::enabled();\n\3",
         "APP_STATE.loadFromFile before isSleepWake")
 
     s = sub_once(
